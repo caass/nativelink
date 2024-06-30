@@ -25,7 +25,14 @@ prost-types = "0.12.4"
 rand = "0.8.5"
 serde = { version = "1.0.201", features = ["derive"] }
 sha2 = "0.10.8"
-tokio = { version = "1.37.0", features = [ "sync", "fs", "rt", "time", "io-util", "macros" ] }
+tokio = { version = "1.37.0", features = [
+  "sync",
+  "fs",
+  "rt",
+  "time",
+  "io-util",
+  "macros",
+] }
 tokio-stream = { version = "0.1.15", features = ["sync"] }
 tokio-util = { version = "0.7.11" }
 tonic = { version = "0.11.0", features = ["tls"] }

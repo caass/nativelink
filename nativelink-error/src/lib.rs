@@ -327,6 +327,26 @@ pub enum Code {
     // in both match statements in retry.rs.
 }
 
+impl Code {
+    pub fn is_unrecoverable_error(&self) -> bool {
+        matches!(
+            self,
+            Code::InvalidArgument
+                | Code::FailedPrecondition
+                | Code::OutOfRange
+                | Code::Unimplemented
+                | Code::NotFound
+                | Code::AlreadyExists
+                | Code::PermissionDenied
+                | Code::Unauthenticated
+        )
+    }
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Code::Ok)
+    }
+}
+
 impl From<i32> for Code {
     fn from(code: i32) -> Self {
         match code {

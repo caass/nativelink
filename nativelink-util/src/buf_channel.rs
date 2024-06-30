@@ -111,11 +111,27 @@ impl DropCloserWriteHalf {
     /// Binds a reader and a writer together. This will send all the data from the reader
     /// to the writer until an EOF is received.
     pub async fn bind(&mut self, reader: &mut DropCloserReadHalf) -> Result<(), Error> {
+        self.bind_with(reader, |_| {}).await
+    }
+
+    /// Binds a reader and a writer together. This will send all the data from the reader
+    /// to the writer until an EOF is received.
+    ///
+    /// The additional parameter allows for reading chunks received from the reader before they are
+    /// sent to the writer.
+    pub async fn bind_with<F: FnMut(Bytes)>(
+        &mut self,
+        reader: &mut DropCloserReadHalf,
+        mut f: F,
+    ) -> Result<(), Error> {
         loop {
             let chunk = reader
                 .recv()
                 .await
                 .err_tip(|| "In DropCloserWriteHalf::bind::recv")?;
+
+            (f)(chunk.clone());
+
             if chunk.is_empty() {
                 self.send_eof()
                     .err_tip(|| "In DropCloserWriteHalf::bind::send_eof")?;
