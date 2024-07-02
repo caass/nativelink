@@ -21,13 +21,13 @@ use futures::stream::repeat_with;
 use nativelink_config::stores::Retry;
 use nativelink_error::{make_err, Code, Error};
 use nativelink_macro::nativelink_test;
-use nativelink_util::retry::{Retrier, RetryResult};
+use nativelink_util::retry::{Retry, RetryResult};
 use pretty_assertions::assert_eq;
 use tokio::time::Duration;
 
 #[nativelink_test]
 async fn retry_simple_success() -> Result<(), Error> {
-    let retrier = Retrier::new(
+    let retrier = Retry::new(
         Arc::new(|_duration| Box::pin(ready(()))),
         Arc::new(move |_delay| Duration::from_millis(1)),
         Retry {
@@ -55,7 +55,7 @@ async fn retry_simple_success() -> Result<(), Error> {
 
 #[nativelink_test]
 async fn retry_fails_after_3_runs() -> Result<(), Error> {
-    let retrier = Retrier::new(
+    let retrier = Retry::new(
         Arc::new(|_duration| Box::pin(ready(()))),
         Arc::new(move |_delay| Duration::from_millis(1)),
         Retry {
@@ -86,7 +86,7 @@ async fn retry_fails_after_3_runs() -> Result<(), Error> {
 
 #[nativelink_test]
 async fn retry_success_after_2_runs() -> Result<(), Error> {
-    let retrier = Retrier::new(
+    let retrier = Retry::new(
         Arc::new(|_duration| Box::pin(ready(()))),
         Arc::new(move |_delay| Duration::from_millis(1)),
         Retry {
@@ -120,7 +120,7 @@ async fn retry_calls_sleep_fn() -> Result<(), Error> {
     const EXPECTED_MS: u64 = 71;
     let sleep_fn_run_count = Arc::new(AtomicI32::new(0));
     let sleep_fn_run_count_copy = sleep_fn_run_count.clone();
-    let retrier = Retrier::new(
+    let retrier = Retry::new(
         Arc::new(move |duration| {
             // Note: Need to make another copy to make the compiler happy.
             let sleep_fn_run_count_copy = sleep_fn_run_count_copy.clone();

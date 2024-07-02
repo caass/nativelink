@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::cell::UnsafeCell;
 use std::io::SeekFrom;
-use std::ops::Bound;
+use std::iter;
+use std::ops::{Bound, Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::future::{try_join, Future};
-use futures::stream::StreamExt;
-use nativelink_config::stores::{ErrorCode, Retry};
-use nativelink_error::{make_err, Code, Error, ResultExt};
+use nativelink_config::stores::ErrorCode;
+use nativelink_error::{Code, Error, ResultExt};
 use pin_project_lite::pin_project;
 use prometheus_client::registry::Registry;
 use rand::rngs::OsRng;
@@ -40,50 +40,54 @@ use crate::store_trait::{
     StoreDriver, StoreKey, StoreOptimizations, StoreSubscription, UploadSizeInfo,
 };
 
-struct ExponentialBackoff {
-    current: Duration,
+struct ExponentialBackoff<'f, J> {
+    jitter_fn: &'f J,
+    jitter_amt: f32,
+
+    max_retries: usize,
+    num_retries: usize,
+
+    current_delay: Duration,
 }
 
-impl ExponentialBackoff {
-    fn new(base: Duration) -> Self {
-        ExponentialBackoff { current: base }
-    }
-}
-
-impl Iterator for ExponentialBackoff {
+impl<J: JitterFn> Iterator for ExponentialBackoff<'_, J> {
     type Item = Duration;
 
-    fn next(&mut self) -> Option<Duration> {
-        self.current *= 2;
-        Some(self.current)
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.num_retries >= self.max_retries {
+            None
+        } else {
+            let delay = self.current_delay;
+            let jittered_delay = self.jitter_fn.jitter(delay, self.jitter_amt);
+
+            self.current_delay *= 2;
+            self.num_retries += 1;
+
+            Some(jittered_delay)
+        }
     }
 }
 
-type SleepFn = Arc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Sync + Send>;
-pub(crate) type JitterFn = Arc<dyn Fn(Duration) -> Duration + Send + Sync>;
+impl<'f, J: JitterFn> ExponentialBackoff<'f, J> {
+    fn new(config: &nativelink_config::stores::Retry, jitter_fn: &'f J) -> Self {
+        ExponentialBackoff {
+            jitter_fn,
+            jitter_amt: config.jitter,
 
-#[derive(PartialEq, Eq, Debug)]
-pub enum RetryResult<T> {
-    Ok(T),
-    Retry(Error),
-    Err(Error),
+            max_retries: config.max_retries,
+            num_retries: 0,
+            current_delay: Duration::from_millis(config.delay as u64),
+        }
+    }
 }
 
-/// Class used to retry a job with a sleep function in between each retry.
-#[derive(Clone)]
-pub struct Retrier {
-    sleep_fn: SleepFn,
-    jitter_fn: JitterFn,
-    config: Retry,
-}
-
-pub trait RetrySleepFn {
+pub trait SleepFn {
     type Fut: Future<Output = ()> + Send;
 
     fn sleep(&self, duration: Duration) -> Self::Fut;
 }
 
-impl<F, Fut> RetrySleepFn for F
+impl<F, Fut> SleepFn for F
 where
     F: Fn(Duration) -> Fut,
     Fut: Future<Output = ()> + Send,
@@ -97,7 +101,7 @@ where
 
 struct TokioSleepFn;
 
-impl RetrySleepFn for TokioSleepFn {
+impl SleepFn for TokioSleepFn {
     type Fut = tokio::time::Sleep;
 
     fn sleep(&self, duration: Duration) -> Self::Fut {
@@ -105,11 +109,11 @@ impl RetrySleepFn for TokioSleepFn {
     }
 }
 
-pub trait RetryJitterFn {
+pub trait JitterFn {
     fn jitter(&self, delay: Duration, jitter_amt: f32) -> Duration;
 }
 
-impl<F> RetryJitterFn for F
+impl<F> JitterFn for F
 where
     F: Fn(Duration, f32) -> Duration,
 {
@@ -120,7 +124,7 @@ where
 
 struct DefaultJitterFn;
 
-impl RetryJitterFn for DefaultJitterFn {
+impl JitterFn for DefaultJitterFn {
     fn jitter(&self, delay: Duration, jitter_amt: f32) -> Duration {
         if jitter_amt == 0. {
             return delay;
@@ -263,75 +267,279 @@ impl<'a> RetriableReader<'a> {
 }
 
 pin_project! {
-    pub struct RetryWrapper<S, J> {
+    #[project_ref = RetryProjectionRef]
+    #[project = RetryProjectionMut]
+    pub struct Retry<T, S = TokioSleepFn, J = DefaultJitterFn> {
         #[pin]
-        inner: Arc<dyn StoreDriver>,
+        inner: T,
         config: nativelink_config::stores::Retry,
         sleep_fn: S,
         jitter_fn: J,
     }
 }
 
-impl<S, J> RetryWrapper<S, J> {
-    fn should_retry(&self, error: &Error) -> bool {
-        let code = to_error_code(&error.code);
-        self.config
-            .retry_on_errors
-            .as_ref()
-            .is_some_and(|errors| errors.contains(&code))
-            || !(error.code.is_ok() || error.code.is_unrecoverable_error())
+impl<T, S, J> Deref for Retry<T, S, J> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
-impl<S, J> RetryWrapper<S, J>
-where
-    J: RetryJitterFn,
-{
-    fn backoff_durations(&self) -> impl Iterator<Item = Duration> + '_ {
-        ExponentialBackoff::new(Duration::from_millis(self.config.delay as u64))
-            .map(|delay| self.jitter_fn.jitter(delay, self.config.jitter))
-            .take(self.config.max_retries)
+impl<T, S, J> DerefMut for Retry<T, S, J> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
-impl<S, J> RetryWrapper<S, J>
+impl<T, S, J, U> AsRef<U> for Retry<T, S, J>
 where
-    S: RetrySleepFn + Sync + Send,
-    J: Send + Sync + RetryJitterFn,
+    U: ?Sized,
+    <Retry<T, S, J> as Deref>::Target: AsRef<U>,
 {
-    pub fn new_with_fns(
-        config: nativelink_config::stores::Retry,
-        store: impl StoreDriver,
-        sleep_fn: S,
-        jitter_fn: J,
-    ) -> Self {
-        Self {
+    #[inline(always)]
+    fn as_ref(&self) -> &U {
+        self.deref().as_ref()
+    }
+}
+
+impl<T, S, J, U> AsMut<U> for Retry<T, S, J>
+where
+    U: ?Sized,
+    <Retry<T, S, J> as Deref>::Target: AsMut<U>,
+{
+    #[inline(always)]
+    fn as_mut(&mut self) -> &mut U {
+        self.deref_mut().as_mut()
+    }
+}
+
+pub trait Retriable: Sized {
+    fn with_retry(self, config: nativelink_config::stores::Retry) -> Retry<Self> {
+        Retry::new(config, self)
+    }
+}
+
+impl<T> Retriable for T {}
+
+impl<T, S, J> RetryProjectionRef<'_, T, S, J>
+where
+    T: Unpin,
+    S: SleepFn + Send + Sync,
+    J: JitterFn + Send + Sync,
+{
+    async fn retry<F, Fut, Out>(&self, mut f: F) -> Result<Out, Error>
+    where
+        F: FnMut(Pin<&T>) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
+    {
+        #[inline]
+        fn should_retry(config: &nativelink_config::stores::Retry, error: &Error) -> bool {
+            let code = to_error_code(&error.code);
+            config
+                .retry_on_errors
+                .as_ref()
+                .is_some_and(|errors| errors.contains(&code))
+                || !(error.code.is_ok() || error.code.is_unrecoverable_error())
+        }
+
+        let Self {
+            inner,
+            config,
             sleep_fn,
             jitter_fn,
-            config,
-            inner: Arc::new(store),
-        }
-    }
+        } = self;
 
-    async fn retry<'fut, 'pin, 'f, U, Fut, F>(self: Pin<&'pin Self>, mut f: F) -> Result<U, Error>
-    where
-        'pin: 'f,
-        'f: 'fut,
-        Fut: Future<Output = Result<U, Error>> + 'fut,
-        F: FnMut(Pin<&'pin dyn StoreDriver>) -> Fut + 'f,
-    {
-        let mut backoffs = self.backoff_durations();
-        let this = self.project_ref();
-        let driver = this.inner.get_ref().as_ref();
-        let pinned_driver = Pin::new(driver);
+        let mut backoffs = ExponentialBackoff::new(config, *jitter_fn);
         let mut attempt = 1;
 
         loop {
-            match (f)(pinned_driver).await {
+            match (f)(inner.as_ref()).await {
                 Ok(t) => return Ok(t),
-                Err(error) if self.should_retry(&error) => {
+                Err(error) if should_retry(config, &error) => {
                     if let Some(duration) = backoffs.next() {
-                        self.sleep_fn.sleep(duration).await;
+                        sleep_fn.sleep(duration).await;
+                        attempt += 1;
+                    } else {
+                        event!(
+                            Level::ERROR,
+                            ?attempt,
+                            ?error,
+                            "Not retrying error after max number of retries reached"
+                        );
+                        return Err(error);
+                    }
+                }
+                Err(error) => {
+                    event!(
+                        Level::ERROR,
+                        ?attempt,
+                        ?error,
+                        "Not retrying permanent error"
+                    );
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+impl<T, S, J> RetryProjectionMut<'_, T, S, J>
+where
+    T: Unpin,
+    S: SleepFn + Send + Sync,
+    J: JitterFn + Send + Sync,
+{
+    async fn retry_mut<F, Fut, Out>(&mut self, mut f: F) -> Result<Out, Error>
+    where
+        F: FnMut(Pin<&mut T>) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
+    {
+        #[inline]
+        fn should_retry(config: &nativelink_config::stores::Retry, error: &Error) -> bool {
+            let code = to_error_code(&error.code);
+            config
+                .retry_on_errors
+                .as_ref()
+                .is_some_and(|errors| errors.contains(&code))
+                || !(error.code.is_ok() || error.code.is_unrecoverable_error())
+        }
+
+        let Self {
+            inner,
+            config,
+            sleep_fn,
+            jitter_fn,
+        } = self;
+
+        let mut backoffs = ExponentialBackoff::new(config, *jitter_fn);
+        let mut attempt = 1;
+
+        loop {
+            match (f)(inner.as_mut()).await {
+                Ok(t) => return Ok(t),
+                Err(error) if should_retry(config, &error) => {
+                    if let Some(duration) = backoffs.next() {
+                        sleep_fn.sleep(duration).await;
+                        attempt += 1;
+                    } else {
+                        event!(
+                            Level::ERROR,
+                            ?attempt,
+                            ?error,
+                            "Not retrying error after max number of retries reached"
+                        );
+                        return Err(error);
+                    }
+                }
+                Err(error) => {
+                    event!(
+                        Level::ERROR,
+                        ?attempt,
+                        ?error,
+                        "Not retrying permanent error"
+                    );
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+impl<T, S, J> Retry<T, S, J>
+where
+    T: Unpin,
+    S: SleepFn + Send + Sync,
+    J: JitterFn + Send + Sync,
+{
+    async fn retry_mut<F, Fut, Out>(&mut self, mut f: F) -> Result<Out, Error>
+    where
+        F: FnMut(&mut T) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
+    {
+        #[inline]
+        fn should_retry(config: &nativelink_config::stores::Retry, error: &Error) -> bool {
+            let code = to_error_code(&error.code);
+            config
+                .retry_on_errors
+                .as_ref()
+                .is_some_and(|errors| errors.contains(&code))
+                || !(error.code.is_ok() || error.code.is_unrecoverable_error())
+        }
+
+        let Self {
+            inner,
+            config,
+            sleep_fn,
+            jitter_fn,
+        } = self;
+
+        let mut backoffs = ExponentialBackoff::new(config, jitter_fn);
+        let mut attempt = 1;
+
+        loop {
+            match (f)(inner).await {
+                Ok(t) => return Ok(t),
+                Err(error) if should_retry(config, &error) => {
+                    if let Some(duration) = backoffs.next() {
+                        sleep_fn.sleep(duration).await;
+                        attempt += 1;
+                    } else {
+                        event!(
+                            Level::ERROR,
+                            ?attempt,
+                            ?error,
+                            "Not retrying error after max number of retries reached"
+                        );
+                        return Err(error);
+                    }
+                }
+                Err(error) => {
+                    event!(
+                        Level::ERROR,
+                        ?attempt,
+                        ?error,
+                        "Not retrying permanent error"
+                    );
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    async fn retry<F, Fut, Out>(&self, mut f: F) -> Result<Out, Error>
+    where
+        F: FnMut(&T) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
+    {
+        #[inline]
+        fn should_retry(config: &nativelink_config::stores::Retry, error: &Error) -> bool {
+            let code = to_error_code(&error.code);
+            config
+                .retry_on_errors
+                .as_ref()
+                .is_some_and(|errors| errors.contains(&code))
+                || !(error.code.is_ok() || error.code.is_unrecoverable_error())
+        }
+
+        let Self {
+            inner,
+            config,
+            sleep_fn,
+            jitter_fn,
+        } = self;
+
+        let mut backoffs = ExponentialBackoff::new(config, jitter_fn);
+        let mut attempt = 1;
+
+        loop {
+            match (f)(inner).await {
+                Ok(t) => return Ok(t),
+                Err(error) if should_retry(config, &error) => {
+                    if let Some(duration) = backoffs.next() {
+                        sleep_fn.sleep(duration).await;
                         attempt += 1;
                     } else {
                         event!(
@@ -357,22 +565,28 @@ where
     }
 
     #[inline]
-    async fn retry_with_reader<'fut, 'pin, 'f, 'rdr, U, Fut, F>(
-        self: Pin<&'pin Self>,
-        reader: &'rdr mut DropCloserReadHalf,
-        mut f: F,
-    ) -> Result<U, Error>
+    async fn retry_pinned<F, Fut, Out>(self: Pin<&Self>, f: F) -> Result<Out, Error>
     where
-        'rdr: 'pin,
-        'pin: 'f,
-        'f: 'fut,
-        Fut: Future<Output = Result<U, Error>> + 'fut,
-        F: FnMut(Pin<&'pin dyn StoreDriver>, DropCloserReadHalf) -> Fut + 'f,
+        F: FnMut(Pin<&T>) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
+    {
+        self.project_ref().retry(f).await
+    }
+
+    #[inline]
+    async fn retry_pinned_with_reader<F, Fut, Out>(
+        self: Pin<&Self>,
+        reader: &mut DropCloserReadHalf,
+        mut f: F,
+    ) -> Result<Out, Error>
+    where
+        F: FnMut(Pin<&T>, DropCloserReadHalf) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
     {
         let retriable_reader = RetriableReader::new(reader);
         let retriable_f = RetryCell::new(&mut f);
 
-        self.retry(|inner| {
+        self.retry_pinned(|inner| {
             // Safety: we uphold `RetriableReader`'s invariants.
             let rdr_fut = unsafe { retriable_reader.get() };
             // Safety: we uphold `RetryCell`'s invariants
@@ -388,16 +602,16 @@ where
     }
 
     #[inline]
-    async fn retry_with_file<'fut, 'pin, 'f, U, Fut, F>(
-        self: Pin<&'pin Self>,
+    async fn retry_pinned_with_file<F, Fut, Out, U>(
+        self: Pin<&Self>,
         mut file: ResumeableFileSlot,
         mut f: F,
-    ) -> Result<U, Error>
+    ) -> Result<Out, Error>
     where
-        'pin: 'f,
-        'f: 'fut,
-        Fut: Future<Output = Result<U, Error>> + 'fut,
-        F: FnMut(Pin<&'pin dyn StoreDriver>, ResumeableFileSlot) -> Fut + 'f,
+        T: Borrow<U>,
+        U: Unpin + ?Sized,
+        F: FnMut(Pin<&U>, ResumeableFileSlot) -> Fut,
+        Fut: Future<Output = Result<Out, Error>>,
     {
         let reader = file
             .as_reader()
@@ -429,7 +643,7 @@ where
 
         let retriable_f = RetryCell::new(&mut f);
 
-        self.retry(|inner| {
+        self.retry_pinned(|inner| {
             // Safety: `RetryCell`'s invariant is upheld.
             let f = unsafe { retriable_f.get() };
             async move {
@@ -441,18 +655,58 @@ where
     }
 }
 
-impl RetryWrapper<TokioSleepFn, DefaultJitterFn> {
+impl<T> Retry<T, TokioSleepFn, DefaultJitterFn> {
     #[inline]
-    pub fn new(config: nativelink_config::stores::Retry, store: impl StoreDriver) -> Self {
-        Self::new_with_fns(config, store, TokioSleepFn, DefaultJitterFn)
+    pub fn new(config: nativelink_config::stores::Retry, inner: T) -> Self {
+        Retry::new_with_jitter(config, inner, DefaultJitterFn)
+    }
+}
+
+impl<T, J: JitterFn + Send + Sync> Retry<T, TokioSleepFn, J> {
+    #[inline]
+    pub fn new_with_jitter(
+        config: nativelink_config::stores::Retry,
+        inner: T,
+        jitter_fn: J,
+    ) -> Self {
+        Retry::new_with_jitter_and_sleep(config, inner, TokioSleepFn, jitter_fn)
+    }
+}
+
+impl<T, S: SleepFn + Send + Sync> Retry<T, S, DefaultJitterFn> {
+    #[inline]
+    pub fn new_with_sleep(config: nativelink_config::stores::Retry, inner: T, sleep_fn: S) -> Self {
+        Retry::new_with_jitter_and_sleep(config, inner, sleep_fn, DefaultJitterFn)
+    }
+}
+
+impl<T, S, J> Retry<T, S, J>
+where
+    S: SleepFn + Send + Sync,
+    J: JitterFn + Send + Sync,
+{
+    #[inline]
+    pub fn new_with_jitter_and_sleep(
+        config: nativelink_config::stores::Retry,
+        inner: T,
+        sleep_fn: S,
+        jitter_fn: J,
+    ) -> Self {
+        Self {
+            sleep_fn,
+            jitter_fn,
+            config,
+            inner,
+        }
     }
 }
 
 #[async_trait]
-impl<S, J> HealthStatusIndicator for RetryWrapper<S, J>
+impl<T, S, J> HealthStatusIndicator for Retry<Arc<T>, S, J>
 where
-    S: RetrySleepFn + Sync + Send + Unpin,
-    J: RetryJitterFn + Send + Sync + Unpin,
+    S: SleepFn + Sync + Send + Unpin,
+    J: JitterFn + Send + Sync + Unpin,
+    T: HealthStatusIndicator + ?Sized,
 {
     #[inline]
     fn get_name(&self) -> &'static str {
@@ -471,14 +725,16 @@ where
 }
 
 #[async_trait]
-impl<S, J> StoreDriver for RetryWrapper<S, J>
+impl<T, S, J> StoreDriver for Retry<Arc<T>, S, J>
 where
-    S: RetrySleepFn + Sync + Send + Unpin + 'static,
-    J: RetryJitterFn + Send + Sync + Unpin + 'static,
+    S: SleepFn + Sync + Send + Unpin + 'static,
+    J: JitterFn + Send + Sync + Unpin + 'static,
+    T: StoreDriver + ?Sized,
 {
     #[inline]
     async fn has(self: Pin<&Self>, key: StoreKey<'_>) -> Result<Option<usize>, Error> {
-        self.retry(|store| store.has(key.borrow())).await
+        self.retry_pinned(|store: Pin<&T>| store.has(key.borrow()))
+            .await
     }
 
     #[inline]
@@ -486,7 +742,8 @@ where
         self: Pin<&Self>,
         digests: &[StoreKey<'_>],
     ) -> Result<Vec<Option<usize>>, Error> {
-        self.retry(|store| store.has_many(digests)).await
+        self.retry_pinned(|store: Pin<&T>| store.has_many(digests))
+            .await
     }
 
     #[inline]
@@ -497,8 +754,10 @@ where
     ) -> Result<(), Error> {
         let retriable_results = RetryCell::new(results);
         // Safety: `RetryCell`'s invariants are upheld.
-        self.retry(|store| store.has_with_results(digests, unsafe { retriable_results.get() }))
-            .await
+        self.retry_pinned(|store: Pin<&T>| {
+            store.has_with_results(digests, unsafe { retriable_results.get() })
+        })
+        .await
     }
 
     #[inline]
@@ -517,8 +776,10 @@ where
         };
 
         // Safety: `RetryCell`'s invariants are upheld.
-        self.retry(|store| store.list(retriable_range(), unsafe { retriable_handler.get() }))
-            .await
+        self.retry_pinned(|store: Pin<&T>| {
+            store.list(retriable_range(), unsafe { retriable_handler.get() })
+        })
+        .await
     }
 
     #[inline]
@@ -528,7 +789,7 @@ where
         mut reader: DropCloserReadHalf,
         upload_size: UploadSizeInfo,
     ) -> Result<(), Error> {
-        self.retry_with_reader(&mut reader, |store, rx| {
+        self.retry_pinned_with_reader(&mut reader, |store: Pin<&T>, rx| {
             store.update(key.borrow(), rx, upload_size)
         })
         .await
@@ -546,7 +807,7 @@ where
         file: fs::ResumeableFileSlot,
         upload_size: UploadSizeInfo,
     ) -> Result<Option<fs::ResumeableFileSlot>, Error> {
-        self.retry_with_file(file, |store, file| {
+        self.retry_pinned_with_file(file, |store: Pin<&T>, file| {
             store.update_with_whole_file(key.borrow(), file, upload_size)
         })
         .await
@@ -554,7 +815,7 @@ where
 
     #[inline]
     async fn update_oneshot(self: Pin<&Self>, key: StoreKey<'_>, data: Bytes) -> Result<(), Error> {
-        self.retry(|store| store.update_oneshot(key.borrow(), data.clone()))
+        self.retry_pinned(|store: Pin<&T>| store.update_oneshot(key.borrow(), data.clone()))
             .await
     }
 
@@ -568,7 +829,7 @@ where
     ) -> Result<(), Error> {
         let retriable_writer = RetryCell::new(writer);
 
-        self.retry(|store| {
+        self.retry_pinned(|store: Pin<&T>| {
             store.get_part(
                 key.borrow(),
                 // Safety: we uphold `RetryCell`'s invariants
@@ -588,7 +849,7 @@ where
     ) -> Result<(), Error> {
         let writer = RetryCell::new(&mut writer);
 
-        self.retry(|store| {
+        self.retry_pinned(|store: Pin<&T>| {
             // Safety: we uphold `RetryCell`'s invariant
             let outer_tx = unsafe { writer.get() };
 
@@ -614,7 +875,7 @@ where
         offset: usize,
         length: Option<usize>,
     ) -> Result<Bytes, Error> {
-        self.retry(|store| store.get_part_unchunked(key.borrow(), offset, length))
+        self.retry_pinned(|store: Pin<&T>| store.get_part_unchunked(key.borrow(), offset, length))
             .await
     }
 
@@ -675,95 +936,5 @@ fn to_error_code(code: &Code) -> ErrorCode {
         Code::DataLoss => ErrorCode::DataLoss,
         Code::Unauthenticated => ErrorCode::Unauthenticated,
         _ => ErrorCode::Unknown,
-    }
-}
-
-impl Retrier {
-    pub fn new(sleep_fn: SleepFn, jitter_fn: JitterFn, config: Retry) -> Self {
-        Retrier {
-            sleep_fn,
-            jitter_fn,
-            config,
-        }
-    }
-
-    /// This should only return true if the error code should be interpreted as
-    /// temporary.
-    fn should_retry(&self, code: &Code) -> bool {
-        if *code == Code::Ok {
-            false
-        } else if let Some(retry_codes) = &self.config.retry_on_errors {
-            retry_codes.contains(&to_error_code(code))
-        } else {
-            match code {
-                Code::InvalidArgument => false,
-                Code::FailedPrecondition => false,
-                Code::OutOfRange => false,
-                Code::Unimplemented => false,
-                Code::NotFound => false,
-                Code::AlreadyExists => false,
-                Code::PermissionDenied => false,
-                Code::Unauthenticated => false,
-                Code::Cancelled => true,
-                Code::Unknown => true,
-                Code::DeadlineExceeded => true,
-                Code::ResourceExhausted => true,
-                Code::Aborted => true,
-                Code::Internal => true,
-                Code::Unavailable => true,
-                Code::DataLoss => true,
-                _ => true,
-            }
-        }
-    }
-
-    fn get_retry_config(&self) -> impl Iterator<Item = Duration> + '_ {
-        ExponentialBackoff::new(Duration::from_millis(self.config.delay as u64))
-            .map(|d| (self.jitter_fn)(d))
-            .take(self.config.max_retries) // Remember this is number of retries, so will run max_retries + 1.
-    }
-
-    // Clippy complains that this function can be `async fn`, but this is not true.
-    // If we use `async fn`, other places in our code will fail to compile stating
-    // something about the async blocks not matching.
-    // This appears to happen due to a compiler bug while inlining, because the
-    // function that it complained about was calling another function that called
-    // this one.
-    #[allow(clippy::manual_async_fn)]
-    pub fn retry<'a, T: Send>(
-        &'a self,
-        operation: impl futures::stream::Stream<Item = RetryResult<T>> + Send + 'a,
-    ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
-        async move {
-            let mut iter = self.get_retry_config();
-            tokio::pin!(operation);
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                match operation.next().await {
-                    None => {
-                        return Err(make_err!(
-                            Code::Internal,
-                            "Retry stream ended abruptly on attempt {attempt}",
-                        ))
-                    }
-                    Some(RetryResult::Ok(value)) => return Ok(value),
-                    Some(RetryResult::Err(e)) => {
-                        return Err(e.append(format!("On attempt {attempt}")));
-                    }
-                    Some(RetryResult::Retry(err)) => {
-                        if !self.should_retry(&err.code) {
-                            event!(Level::ERROR, ?attempt, ?err, "Not retrying permanent error");
-                            return Err(err);
-                        }
-                        (self.sleep_fn)(
-                            iter.next()
-                                .ok_or(err.append(format!("On attempt {attempt}")))?,
-                        )
-                        .await
-                    }
-                }
-            }
-        }
     }
 }

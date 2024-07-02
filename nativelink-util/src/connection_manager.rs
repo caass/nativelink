@@ -20,14 +20,14 @@ use std::time::Duration;
 
 use futures::stream::{unfold, FuturesUnordered, StreamExt};
 use futures::Future;
-use nativelink_config::stores::Retry;
+use nativelink_config::stores::Retry as RetryConfig;
 use nativelink_error::{make_err, Code, Error};
 use tokio::sync::{mpsc, oneshot};
 use tonic::transport::{channel, Channel, Endpoint};
 use tracing::{event, Level};
 
 use crate::background_spawn;
-use crate::retry::{self, Retrier, RetryResult};
+use crate::retry::{JitterFn, Retriable, Retry, SleepFn};
 
 /// A helper utility that enables management of a suite of connections to an
 /// upstream gRPC endpoint using Tonic.
@@ -102,9 +102,6 @@ struct ConnectionManagerWorker {
     available_channels: VecDeque<EstablishedChannel>,
     /// Requests for a Channel when available.
     waiting_connections: VecDeque<oneshot::Sender<Connection>>,
-    /// The retry configuration for connecting to an Endpoint, on failure will
-    /// restart the retrier after a 1 second delay.
-    retrier: Retrier,
 }
 
 /// The maximum number of queued requests to obtain a connection from the
@@ -120,8 +117,8 @@ impl ConnectionManager {
         endpoints: impl IntoIterator<Item = Endpoint>,
         mut connections_per_endpoint: usize,
         mut max_concurrent_requests: usize,
-        retry: Retry,
-        jitter_fn: retry::JitterFn,
+        retry_config: nativelink_config::stores::Retry,
+        jitter_fn: impl JitterFn,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(WORKER_BACKLOG);
         // The connection messages always come from sync contexts (e.g. drop)
@@ -136,19 +133,15 @@ impl ConnectionManager {
         if connections_per_endpoint == 0 {
             connections_per_endpoint = 1;
         }
-        let worker = ConnectionManagerWorker {
+        let mut worker = ConnectionManagerWorker {
             endpoints,
             available_connections: max_concurrent_requests,
             connection_tx,
             connecting_channels: FuturesUnordered::new(),
             available_channels: VecDeque::new(),
             waiting_connections: VecDeque::new(),
-            retrier: Retrier::new(
-                Arc::new(|duration| Box::pin(tokio::time::sleep(duration))),
-                jitter_fn,
-                retry,
-            ),
-        };
+        }
+        .with_retry(retry_config);
         background_spawn!("connection_manager_worker_spawn", async move {
             worker
                 .service_requests(connections_per_endpoint, worker_rx, connection_rx)
@@ -173,7 +166,7 @@ impl ConnectionManager {
 
 impl ConnectionManagerWorker {
     async fn service_requests(
-        mut self,
+        &mut self,
         connections_per_endpoint: usize,
         mut worker_rx: mpsc::Receiver<oneshot::Sender<Connection>>,
         mut connection_rx: mpsc::UnboundedReceiver<ConnectionRequest>,

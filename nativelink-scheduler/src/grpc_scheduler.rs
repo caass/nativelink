@@ -31,7 +31,7 @@ use nativelink_util::action_messages::{
     ActionInfo, ActionInfoHashKey, ActionState, DEFAULT_EXECUTION_PRIORITY,
 };
 use nativelink_util::connection_manager::ConnectionManager;
-use nativelink_util::retry::{Retrier, RetryResult};
+use nativelink_util::retry::{Retry, RetryResult};
 use nativelink_util::{background_spawn, tls_utils};
 use parking_lot::Mutex;
 use rand::rngs::OsRng;
@@ -47,7 +47,7 @@ use crate::platform_property_manager::PlatformPropertyManager;
 
 pub struct GrpcScheduler {
     platform_property_managers: Mutex<HashMap<String, Arc<PlatformPropertyManager>>>,
-    retrier: Retrier,
+    retrier: Retry,
     connection_manager: ConnectionManager,
 }
 
@@ -75,7 +75,7 @@ impl GrpcScheduler {
         let jitter_fn = Arc::new(jitter_fn);
         Ok(Self {
             platform_property_managers: Mutex::new(HashMap::new()),
-            retrier: Retrier::new(
+            retrier: Retry::new(
                 Arc::new(|duration| Box::pin(sleep(duration))),
                 jitter_fn.clone(),
                 config.retry.to_owned(),

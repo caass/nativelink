@@ -44,7 +44,7 @@ use nativelink_util::proto_stream_utils::{
     FirstStream, WriteRequestStreamWrapper, WriteState, WriteStateWrapper,
 };
 use nativelink_util::resource_info::ResourceInfo;
-use nativelink_util::retry::{Retrier, RetryResult};
+use nativelink_util::retry::{Retry, RetryResult};
 use nativelink_util::store_trait::{StoreDriver, StoreKey, UploadSizeInfo};
 use nativelink_util::{default_health_status_indicator, tls_utils};
 use parking_lot::Mutex;
@@ -62,7 +62,7 @@ use uuid::Uuid;
 pub struct GrpcStore {
     instance_name: String,
     store_type: nativelink_config::stores::StoreType,
-    retrier: Retrier,
+    retrier: Retry,
     connection_manager: ConnectionManager,
 }
 
@@ -102,7 +102,7 @@ impl GrpcStore {
         Ok(Arc::new(GrpcStore {
             instance_name: config.instance_name.clone(),
             store_type: config.store_type,
-            retrier: Retrier::new(
+            retrier: Retry::new(
                 Arc::new(|duration| Box::pin(sleep(duration))),
                 jitter_fn.clone(),
                 config.retry.to_owned(),

@@ -46,7 +46,7 @@ use nativelink_util::buf_channel::{
 };
 use nativelink_util::fs;
 use nativelink_util::health_utils::{default_health_status_indicator, HealthStatusIndicator};
-use nativelink_util::retry::{Retrier, RetryResult};
+use nativelink_util::retry::{Retry, RetryResult};
 use nativelink_util::store_trait::{StoreDriver, StoreKey, UploadSizeInfo};
 use rand::rngs::OsRng;
 use rand::Rng;
@@ -130,7 +130,7 @@ impl<T: Connection + AsyncWrite + AsyncRead + Unpin> AsyncWrite for ConnectionWi
 #[derive(Clone)]
 pub struct TlsConnector {
     connector: HttpsConnector<HttpConnector>,
-    retrier: Retrier,
+    retrier: Retry,
 }
 
 impl TlsConnector {
@@ -155,7 +155,7 @@ impl TlsConnector {
 
         Self {
             connector,
-            retrier: Retrier::new(
+            retrier: Retry::new(
                 Arc::new(|duration| Box::pin(sleep(duration))),
                 jitter_fn,
                 config.retry.to_owned(),
@@ -236,7 +236,7 @@ pub struct S3Store {
     s3_client: Arc<Client>,
     bucket: String,
     key_prefix: String,
-    retrier: Retrier,
+    retrier: Retry,
     max_retry_buffer_per_request: usize,
     multipart_max_concurrent_uploads: usize,
 }
@@ -286,7 +286,7 @@ impl S3Store {
             s3_client: Arc::new(s3_client),
             bucket: config.bucket.to_string(),
             key_prefix: config.key_prefix.as_ref().unwrap_or(&String::new()).clone(),
-            retrier: Retrier::new(
+            retrier: Retry::new(
                 Arc::new(|duration| Box::pin(sleep(duration))),
                 jitter_fn,
                 config.retry.to_owned(),
