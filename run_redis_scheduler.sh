@@ -5,7 +5,7 @@ COUNT=$1  # Maximum number of worker jobs at any time
 shift
 
 export PUBLIC_PORT=50051
-cargo run --profile=smol -- $PWD/nativelink-config/examples/redis_scheduler_cas.json &
+RUST_LOG=trace cargo run --profile=smol -- $PWD/nativelink-config/examples/redis_scheduler_cas.json &
 
 cd ~/nativelink
 

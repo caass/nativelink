@@ -225,7 +225,8 @@ async fn upload_and_get_data() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())?
+        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
+            .await?
     };
 
     store.update_oneshot(digest, data.clone()).await.unwrap();
@@ -306,7 +307,8 @@ async fn upload_and_get_data_with_prefix() -> Result<(), Error> {
             None,
             mock_uuid_generator,
             prefix.to_string(),
-        )?
+        )
+        .await?
     };
 
     store.update_oneshot(digest, data.clone()).await.unwrap();
@@ -339,7 +341,7 @@ async fn upload_empty_data() -> Result<(), Error> {
         mock_uuid_generator,
         String::new(),
     )
-    .unwrap();
+    .await?;
 
     store.update_oneshot(digest, data).await.unwrap();
 
@@ -364,7 +366,7 @@ async fn upload_empty_data_with_prefix() -> Result<(), Error> {
         mock_uuid_generator,
         prefix.to_string(),
     )
-    .unwrap();
+    .await?;
 
     store.update_oneshot(digest, data).await.unwrap();
 
@@ -450,7 +452,8 @@ async fn test_large_downloads_are_chunked() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())?
+        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
+            .await?
     };
 
     store.update_oneshot(digest, data.clone()).await.unwrap();
@@ -545,7 +548,8 @@ async fn yield_between_sending_packets_in_update() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())?
+        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
+            .await?
     };
 
     let (mut tx, rx) = make_buf_channel_pair();
@@ -625,7 +629,8 @@ async fn zero_len_items_exist_check() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())?
+        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
+            .await?
     };
 
     let result = store.get_part_unchunked(digest, 0, None).await;

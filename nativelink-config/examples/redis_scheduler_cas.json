@@ -5,7 +5,11 @@
         "addresses": [
             "redis://127.0.0.1:6379/"
         ],
-        "experimental_pub_sub_channel": "scheduler_channel"
+        "experimental_pub_sub_channel": "scheduler_channel",
+        "retry": {
+          "delay": 0.3,
+          "jitter": 0.5
+        }
       }
     },
     "AC_MAIN_STORE": {
@@ -13,7 +17,11 @@
         "addresses": [
             "redis://127.0.0.1:6379/"
         ],
-        "key_prefix": "ac"
+        "key_prefix": "ac",
+        "retry": {
+          "delay": 0.3,
+          "jitter": 0.5
+        }
       }
     },
     "CAS_MAIN_STORE": {
@@ -21,7 +29,11 @@
         "addresses": [
             "redis://127.0.0.1:6379/"
         ],
-        "key_prefix": "cas"
+        "key_prefix": "cas",
+        "retry": {
+          "delay": 0.3,
+          "jitter": 0.5
+        }
       }
     }
   },

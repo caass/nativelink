@@ -77,6 +77,7 @@ impl<S: SchedulerStore> OperationSubscriber<S> {
             .upgrade()
             .err_tip(|| "Store gone in OperationSubscriber::get_awaited_action")?;
         let key = self.subscription_key.borrow();
+        println!("HERE2");
         let mut awaited_action = store
             .get_and_decode(key.borrow())
             .await
@@ -87,6 +88,7 @@ impl<S: SchedulerStore> OperationSubscriber<S> {
                     "Could not find AwaitedAction for the given operation id {key:?}",
                 )
             })?;
+        println!("HERE3");
         if let Some(client_operation_id) = &self.maybe_client_operation_id {
             let mut state = awaited_action.state().as_ref().clone();
             state.client_operation_id = client_operation_id.clone();
@@ -360,11 +362,13 @@ impl<S: SchedulerStore, F: Fn() -> OperationId> StoreAwaitedActionDb<S, F> {
             ActionUniqueQualifier::Cachable(_) => {}
             ActionUniqueQualifier::Uncachable(_) => return Ok(None),
         }
+        println!("BEFORE TRY_SUBSCRIBE");
         let stream = self
             .store
             .search_by_index_prefix(SearchUniqueQualifierToAwaitedAction(unique_qualifier))
             .await
             .err_tip(|| "In RedisAwaitedActionDb::try_subscribe")?;
+        println!("AFTER TRY_SUBSCRIBE");
         tokio::pin!(stream);
         let maybe_awaited_action = stream
             .try_next()
@@ -395,6 +399,7 @@ impl<S: SchedulerStore, F: Fn() -> OperationId> StoreAwaitedActionDb<S, F> {
         &self,
         client_operation_id: &ClientOperationId,
     ) -> Result<Option<OperationSubscriber<S>>, Error> {
+        println!("HERE");
         let maybe_operation_id = self
             .store
             .get_and_decode(ClientIdToOperationId(client_operation_id))
@@ -532,7 +537,8 @@ impl<S: SchedulerStore, F: Fn() -> OperationId + Send + Sync + Unpin + 'static> 
                 "Descending order is not supported in RedisAwaitedActionDb::get_range_of_actions",
             ));
         }
-        Ok(self
+        println!("BEFORE GET_RANGE_OF_ACTIONS");
+        let res = Ok(self
             .store
             .search_by_index_prefix(SearchSortKeyPrefixToAwaitedAction(get_state_prefix(&state)))
             .await
@@ -544,13 +550,16 @@ impl<S: SchedulerStore, F: Fn() -> OperationId + Send + Sync + Unpin + 'static> 
                     Arc::downgrade(&self.store),
                     self.now_fn,
                 )
-            }))
+            }));
+        println!("AFTER GET_RANGE_OF_ACTIONS");
+        res
     }
 
     async fn get_all_awaited_actions(
         &self,
     ) -> Result<impl Stream<Item = Result<Self::Subscriber, Error>>, Error> {
-        Ok(self
+        println!("BEFORE GET_ALL_AWAITED_ACTIONS");
+        let res = Ok(self
             .store
             .search_by_index_prefix(SearchSortKeyPrefixToAwaitedAction(""))
             .await
@@ -562,6 +571,8 @@ impl<S: SchedulerStore, F: Fn() -> OperationId + Send + Sync + Unpin + 'static> 
                     Arc::downgrade(&self.store),
                     self.now_fn,
                 )
-            }))
+            }));
+        println!("AFTER GET_ALL_AWAITED_ACTIONS");
+        res
     }
 }

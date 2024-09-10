@@ -397,6 +397,7 @@ async fn add_action_smoke_test() -> Result<(), Error> {
                 mock_uuid_generator,
                 String::new(),
             )
+            .await
             .unwrap(),
         )
     };

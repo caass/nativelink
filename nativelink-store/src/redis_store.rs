@@ -28,12 +28,14 @@ use fred::types::{
     Builder, ConnectionConfig, FtCreateOptions, PerformanceConfig, ReconnectPolicy, RedisConfig,
     RedisKey, RedisMap, RedisValue, Script, SearchSchema, SearchSchemaKind,
 };
+use futures::stream::unfold;
 use futures::{FutureExt, Stream, StreamExt};
 use nativelink_config::stores::RedisMode;
 use nativelink_error::{make_err, make_input_err, Code, Error, ResultExt};
 use nativelink_metric::MetricsComponent;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::health_utils::{HealthRegistryBuilder, HealthStatus, HealthStatusIndicator};
+use nativelink_util::retry::{Retrier, RetryResult};
 use nativelink_util::spawn;
 use nativelink_util::store_trait::{
     BoolValue, SchedulerCurrentVersionProvider, SchedulerIndexProvider, SchedulerStore,
@@ -43,6 +45,8 @@ use nativelink_util::store_trait::{
 use nativelink_util::task::JoinHandleDropGuard;
 use parking_lot::{Mutex, RwLock};
 use patricia_tree::StringPatriciaMap;
+use rand::rngs::OsRng;
+use rand::Rng;
 use tokio::select;
 use tokio::time::sleep;
 use tracing::{event, Level};
@@ -84,11 +88,13 @@ pub struct RedisStore {
 
     /// A manager for subscriptions to keys in Redis.
     subscription_manager: Mutex<Option<Arc<RedisSubscriptionManager>>>,
+
+    _conn_spawn: JoinHandleDropGuard<()>,
 }
 
 impl RedisStore {
     /// Create a new `RedisStore` from the given configuration.
-    pub fn new(config: &nativelink_config::stores::RedisStore) -> Result<Arc<Self>, Error> {
+    pub async fn new(config: &nativelink_config::stores::RedisStore) -> Result<Arc<Self>, Error> {
         if config.addresses.is_empty() {
             return Err(make_err!(
                 Code::InvalidArgument,
@@ -122,24 +128,8 @@ impl RedisStore {
                 ..Default::default()
             })
             // TODO(caass): Make this configurable.
-            .set_policy(ReconnectPolicy::new_constant(1, 0));
+            .set_policy(ReconnectPolicy::new_constant(8, 0));
 
-        Self::new_from_builder_and_parts(
-            builder,
-            config.experimental_pub_sub_channel.clone(),
-            || Uuid::new_v4().to_string(),
-            config.key_prefix.clone(),
-        )
-        .map(Arc::new)
-    }
-
-    /// Used for testing when determinism is required.
-    pub fn new_from_builder_and_parts(
-        mut builder: Builder,
-        pub_sub_channel: Option<String>,
-        temp_name_generator_fn: fn() -> String,
-        key_prefix: String,
-    ) -> Result<Self, Error> {
         let client_pool = builder
             .set_performance_config(PerformanceConfig {
                 broadcast_channel_capacity: 4096,
@@ -151,10 +141,104 @@ impl RedisStore {
         let subscriber_client = builder
             .build_subscriber_client()
             .err_tip(|| "while creating redis subscriber client")?;
-        // Fires off a background task using `tokio::spawn`.
-        client_pool.connect();
-        subscriber_client.connect();
+        let client_pool_clone = client_pool.clone();
+        let subscriber_client_clone = subscriber_client.clone();
 
+        let mut retry_config = config.retry.clone();
+        if retry_config.max_retries == 0 {
+            retry_config.max_retries = usize::MAX;
+        } else {
+            event!(
+                Level::WARN,
+                "RedisStore is configured with retry::max_retries set to {}, but this may cause redis to never come back online.",
+                retry_config.max_retries,
+            );
+        }
+
+        let jitter_amt = retry_config.jitter;
+        let retrier = Retrier::new(
+            Arc::new(|duration| Box::pin(sleep(duration))),
+            Arc::new(move |delay: Duration| {
+                if jitter_amt == 0. {
+                    return delay;
+                }
+                let min = 1. - (jitter_amt / 2.);
+                let max = 1. + (jitter_amt / 2.);
+                delay.mul_f32(OsRng.gen_range(min..max))
+            }),
+            retry_config,
+        );
+
+        let experimental_pub_sub_channel = config.experimental_pub_sub_channel.clone();
+        let key_prefix = config.key_prefix.clone();
+        let config = config.clone();
+        let conn_spawn = spawn!("redis_subscribe_spawn", async move {
+            let _ = futures::join!(
+                retrier.retry(unfold((), |()| async {
+                    let res = client_pool_clone
+                        .connect()
+                        .await
+                        .err_tip(|| "While waiting for redis client pool connect for join")
+                        .and_then(|res| {
+                            res.err_tip(|| "While waiting for redis client pool connect")
+                        });
+                    event!(
+                        Level::ERROR,
+                        ?config,
+                        "Error connecting to redis client pool (will retry): {res:?}"
+                    );
+                    Some((
+                        RetryResult::<()>::Retry(make_err!(Code::Aborted, "Error connecting to redis client pool")),
+                        ()
+                    ))
+                })),
+                retrier.retry(unfold((), |()| async {
+                    let res = subscriber_client_clone
+                        .connect()
+                        .await
+                        .err_tip(|| "While waiting for redis subscriber client pool connect for join")
+                        .and_then(|res| {
+                            res.err_tip(|| "While waiting for redis subscriber client pool connect")
+                        });
+                    event!(
+                        Level::ERROR,
+                        ?config,
+                        "Error connecting to redis subscriber client pool (will retry): {res:?}"
+                    );
+                    Some((
+                        RetryResult::<()>::Retry(make_err!(Code::Aborted, "Error connecting to redis subscriber client pool")),
+                        ()
+                    ))
+                })),
+            );
+            event!(
+                Level::ERROR,
+                ?config,
+                "Redis connection closed and exausted all retries, exiting RedisStore spawn. RedisStore will NOT come back online. HINT: Configure retries on the store."
+            );
+        });
+
+        Self::new_from_builder_and_parts(
+            client_pool,
+            subscriber_client,
+            experimental_pub_sub_channel,
+            || Uuid::new_v4().to_string(),
+            key_prefix,
+            Some(conn_spawn),
+        )
+        .await
+        .map(Arc::new)
+    }
+
+    /// Used for testing when determinism is required.
+    pub async fn new_from_builder_and_parts(
+        client_pool: RedisPool,
+        subscriber_client: SubscriberClient,
+        pub_sub_channel: Option<String>,
+        temp_name_generator_fn: fn() -> String,
+        key_prefix: String,
+        conn_spawn: Option<JoinHandleDropGuard<()>>,
+    ) -> Result<Self, Error> {
         Ok(Self {
             client_pool,
             pub_sub_channel,
@@ -163,6 +247,7 @@ impl RedisStore {
             key_prefix,
             update_if_version_matches_script: Script::from_lua(LUA_VERSION_SET_SCRIPT),
             subscription_manager: Mutex::new(None),
+            _conn_spawn: conn_spawn.unwrap_or_else(|| spawn!("noop", async { })),
         })
     }
 
@@ -946,9 +1031,11 @@ impl SchedulerStore for RedisStore {
     where
         K: SchedulerIndexProvider + SchedulerStoreDecodeTo + Send,
     {
+        println!("SEARCH BY INDEX PREFIX");
         let index_value_prefix = index.index_value_prefix();
         let run_ft_aggregate = || {
             let client = self.client_pool.next().clone();
+            println!("AFTER CLIENT");
             let sanitized_field = try_sanitize(index_value_prefix.as_ref()).err_tip(|| {
                 format!(
                     "In RedisStore::search_by_index_prefix::try_sanitize - {index_value_prefix:?}"
@@ -987,6 +1074,7 @@ impl SchedulerStore for RedisStore {
                 .await
             })
         };
+        println!("ASDF");
         let stream = match run_ft_aggregate()?.await {
             Ok(stream) => stream,
             Err(_) => {
@@ -1039,6 +1127,7 @@ impl SchedulerStore for RedisStore {
                 }
             }
         };
+        println!("HWAER");
         Ok(stream.map(|result| {
             let mut redis_map =
                 result.err_tip(|| "Error in stream of in RedisStore::search_by_index_prefix")?;
@@ -1072,6 +1161,7 @@ impl SchedulerStore for RedisStore {
     where
         K: SchedulerStoreKeyProvider + SchedulerStoreDecodeTo + Send,
     {
+        println!("GET DECODE");
         let key = key.get_key();
         let key = self.encode_key(&key);
         let client = self.client_pool.next();

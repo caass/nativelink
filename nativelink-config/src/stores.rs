@@ -924,6 +924,11 @@ pub struct RedisStore {
     /// Default: standard,
     #[serde(default)]
     pub mode: RedisMode,
+
+    /// Retry configuration to use when a network request fails.
+    /// See the `Retry` struct for more information.
+    #[serde(default)]
+    pub retry: Retry,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
