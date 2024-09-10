@@ -1,0 +1,79 @@
+{
+  "stores": {
+    "REDIS_SCHEDULER_STORE": {
+      "redis_store": {
+        "addresses": [
+            "redis://127.0.0.1:6379/"
+        ],
+        "experimental_pub_sub_channel": "scheduler_channel"
+      }
+    },
+    "AC_MAIN_STORE": {
+      "redis_store": {
+        "addresses": [
+            "redis://127.0.0.1:6379/"
+        ],
+        "key_prefix": "ac"
+      }
+    },
+    "CAS_MAIN_STORE": {
+      "redis_store": {
+        "addresses": [
+            "redis://127.0.0.1:6379/"
+        ],
+        "key_prefix": "cas"
+      }
+    }
+  },
+  "schedulers": {
+    "SCHEDULER": {
+      "simple": {
+        "supported_platform_properties": {
+          "cpu_count": "minimum"
+        },
+        "experimental_backend": {
+          "redis": {
+            "redis_store": "REDIS_SCHEDULER_STORE"
+          }
+        }
+      }
+    }
+  },
+  "servers": [{
+    "listener": {
+      "http": {
+        "socket_address": "0.0.0.0:${PUBLIC_PORT}"
+      }
+    },
+    "services": {
+      "cas": {
+        "main": {
+          "cas_store": "CAS_MAIN_STORE"
+        }
+      },
+      "ac": {
+        "main": {
+          "ac_store": "AC_MAIN_STORE"
+        }
+      },
+      "execution": {
+        "main": {
+          "cas_store": "CAS_MAIN_STORE",
+          "scheduler": "SCHEDULER"
+        }
+      },
+      "capabilities": {
+        "main": {
+          "remote_execution": {
+            "scheduler": "SCHEDULER"
+          }
+        }
+      },
+      "bytestream": {
+        "cas_stores": {
+          "main": "CAS_MAIN_STORE"
+        }
+      }
+    }
+  }]
+}
