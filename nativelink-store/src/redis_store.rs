@@ -188,15 +188,20 @@ impl RedisStore {
                         "Error connecting to redis client pool (will retry): {res:?}"
                     );
                     Some((
-                        RetryResult::<()>::Retry(make_err!(Code::Aborted, "Error connecting to redis client pool")),
-                        ()
+                        RetryResult::<()>::Retry(make_err!(
+                            Code::Aborted,
+                            "Error connecting to redis client pool"
+                        )),
+                        (),
                     ))
                 })),
                 retrier.retry(unfold((), |()| async {
                     let res = subscriber_client_clone
                         .connect()
                         .await
-                        .err_tip(|| "While waiting for redis subscriber client pool connect for join")
+                        .err_tip(|| {
+                            "While waiting for redis subscriber client pool connect for join"
+                        })
                         .and_then(|res| {
                             res.err_tip(|| "While waiting for redis subscriber client pool connect")
                         });
@@ -206,8 +211,11 @@ impl RedisStore {
                         "Error connecting to redis subscriber client pool (will retry): {res:?}"
                     );
                     Some((
-                        RetryResult::<()>::Retry(make_err!(Code::Aborted, "Error connecting to redis subscriber client pool")),
-                        ()
+                        RetryResult::<()>::Retry(make_err!(
+                            Code::Aborted,
+                            "Error connecting to redis subscriber client pool"
+                        )),
+                        (),
                     ))
                 })),
             );
@@ -247,7 +255,7 @@ impl RedisStore {
             key_prefix,
             update_if_version_matches_script: Script::from_lua(LUA_VERSION_SET_SCRIPT),
             subscription_manager: Mutex::new(None),
-            _conn_spawn: conn_spawn.unwrap_or_else(|| spawn!("noop", async { })),
+            _conn_spawn: conn_spawn.unwrap_or_else(|| spawn!("noop", async {})),
         })
     }
 
@@ -1031,11 +1039,9 @@ impl SchedulerStore for RedisStore {
     where
         K: SchedulerIndexProvider + SchedulerStoreDecodeTo + Send,
     {
-        println!("SEARCH BY INDEX PREFIX");
         let index_value_prefix = index.index_value_prefix();
         let run_ft_aggregate = || {
             let client = self.client_pool.next().clone();
-            println!("AFTER CLIENT");
             let sanitized_field = try_sanitize(index_value_prefix.as_ref()).err_tip(|| {
                 format!(
                     "In RedisStore::search_by_index_prefix::try_sanitize - {index_value_prefix:?}"
@@ -1074,7 +1080,6 @@ impl SchedulerStore for RedisStore {
                 .await
             })
         };
-        println!("ASDF");
         let stream = match run_ft_aggregate()?.await {
             Ok(stream) => stream,
             Err(_) => {
@@ -1127,7 +1132,6 @@ impl SchedulerStore for RedisStore {
                 }
             }
         };
-        println!("HWAER");
         Ok(stream.map(|result| {
             let mut redis_map =
                 result.err_tip(|| "Error in stream of in RedisStore::search_by_index_prefix")?;
@@ -1161,7 +1165,6 @@ impl SchedulerStore for RedisStore {
     where
         K: SchedulerStoreKeyProvider + SchedulerStoreDecodeTo + Send,
     {
-        println!("GET DECODE");
         let key = key.get_key();
         let key = self.encode_key(&key);
         let client = self.client_pool.next();

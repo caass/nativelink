@@ -389,13 +389,17 @@ async fn add_action_smoke_test() -> Result<(), Error> {
             mocks: Some(Arc::clone(&mocks) as Arc<dyn Mocks>),
             ..Default::default()
         });
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
 
         Arc::new(
             RedisStore::new_from_builder_and_parts(
-                builder,
+                client_pool,
+                subscriber_client,
                 Some(SUB_CHANNEL.into()),
                 mock_uuid_generator,
                 String::new(),
+                None,
             )
             .await
             .unwrap(),

@@ -225,8 +225,19 @@ async fn upload_and_get_data() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
-            .await?
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
+
+        RedisStore::new_from_builder_and_parts(
+            client_pool,
+            subscriber_client,
+            None,
+            mock_uuid_generator,
+            String::new(),
+            None,
+        )
+        .await
+        .unwrap()
     };
 
     store.update_oneshot(digest, data.clone()).await.unwrap();
@@ -302,13 +313,19 @@ async fn upload_and_get_data_with_prefix() -> Result<(), Error> {
             ..Default::default()
         });
 
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
+
         RedisStore::new_from_builder_and_parts(
-            builder,
+            client_pool,
+            subscriber_client,
             None,
             mock_uuid_generator,
             prefix.to_string(),
+            None,
         )
-        .await?
+        .await
+        .unwrap()
     };
 
     store.update_oneshot(digest, data.clone()).await.unwrap();
@@ -335,13 +352,20 @@ async fn upload_empty_data() -> Result<(), Error> {
     let digest = ZERO_BYTE_DIGESTS[0];
 
     // We expect to skip both uploading and downloading when the digest is known zero.
+    let builder = Builder::default_centralized();
+    let client_pool = builder.build_pool(1).unwrap();
+    let subscriber_client = builder.build_subscriber_client().unwrap();
+
     let store = RedisStore::new_from_builder_and_parts(
-        Builder::default_centralized(),
+        client_pool,
+        subscriber_client,
         None,
         mock_uuid_generator,
         String::new(),
+        None,
     )
-    .await?;
+    .await
+    .unwrap();
 
     store.update_oneshot(digest, data).await.unwrap();
 
@@ -360,13 +384,20 @@ async fn upload_empty_data_with_prefix() -> Result<(), Error> {
     let digest = ZERO_BYTE_DIGESTS[0];
     let prefix = "TEST_PREFIX-";
 
+    let builder = Builder::default_centralized();
+    let client_pool = builder.build_pool(1).unwrap();
+    let subscriber_client = builder.build_subscriber_client().unwrap();
+
     let store = RedisStore::new_from_builder_and_parts(
-        Builder::default_centralized(),
+        client_pool,
+        subscriber_client,
         None,
         mock_uuid_generator,
         prefix.to_string(),
+        None,
     )
-    .await?;
+    .await
+    .unwrap();
 
     store.update_oneshot(digest, data).await.unwrap();
 
@@ -452,8 +483,19 @@ async fn test_large_downloads_are_chunked() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
-            .await?
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
+
+        RedisStore::new_from_builder_and_parts(
+            client_pool,
+            subscriber_client,
+            None,
+            mock_uuid_generator,
+            String::new(),
+            None,
+        )
+        .await
+        .unwrap()
     };
 
     store.update_oneshot(digest, data.clone()).await.unwrap();
@@ -548,8 +590,19 @@ async fn yield_between_sending_packets_in_update() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
-            .await?
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
+
+        RedisStore::new_from_builder_and_parts(
+            client_pool,
+            subscriber_client,
+            None,
+            mock_uuid_generator,
+            String::new(),
+            None,
+        )
+        .await
+        .unwrap()
     };
 
     let (mut tx, rx) = make_buf_channel_pair();
@@ -629,8 +682,19 @@ async fn zero_len_items_exist_check() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())
-            .await?
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
+
+        RedisStore::new_from_builder_and_parts(
+            client_pool,
+            subscriber_client,
+            None,
+            mock_uuid_generator,
+            String::new(),
+            None,
+        )
+        .await
+        .unwrap()
     };
 
     let result = store.get_part_unchunked(digest, 0, None).await;
@@ -649,7 +713,19 @@ async fn dont_loop_forever_on_empty() -> Result<(), Error> {
             ..Default::default()
         });
 
-        RedisStore::new_from_builder_and_parts(builder, None, mock_uuid_generator, String::new())?
+        let client_pool = builder.build_pool(1).unwrap();
+        let subscriber_client = builder.build_subscriber_client().unwrap();
+
+        RedisStore::new_from_builder_and_parts(
+            client_pool,
+            subscriber_client,
+            None,
+            mock_uuid_generator,
+            String::new(),
+            None,
+        )
+        .await
+        .unwrap()
     };
 
     let digest = DigestInfo::try_new(VALID_HASH1, 2).unwrap();

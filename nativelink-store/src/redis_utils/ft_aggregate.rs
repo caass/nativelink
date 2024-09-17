@@ -34,11 +34,8 @@ where
 {
     let index = index.into();
     let query = query.into();
-    println!("BEF");
     let data_res = client.ft_aggregate(index.clone(), query, options).await;
-    println!("AfT");
     let data: RedisCursorData = data_res?;
-    println!("AFTER w/ data");
 
     struct State<C: RediSearchInterface> {
         client: C,
